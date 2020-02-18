@@ -1,3 +1,4 @@
+import warnings
 import numpy as np
 import pandas as pd
 import re
@@ -10,27 +11,39 @@ class ZooKeeper:
         # validate and assign object
         self._validate(pandas_obj)
         self._obj = pandas_obj
-        # assign dtypes and limits
-        # todo check if there is any benefit to non-nullable dtype (less space than nullable dtype?)
-        self._INT_UNSIGNED_BINS_LOWER = [0, 0, 0, 0]
-        self._INT_UNSIGNED_BINS_UPPER = [255, 65535, 4294967295, 18446744073709551615]
-        self._INT_SIGNED_BINS_LOWER = [-128, -32768, -2147483648, -9223372036854775808]
-        self._INT_SIGNED_BINS_UPPER = [127, 32767, 2147483647, 9223372036854775807]
-        self._INT_UNSIGNED_NOT_NULLABLE_DTYPES = [np.uint8, np.uint16, np.uint32, np.uint64]
-        self._INT_UNSIGNED_NULLABLE_DTYPES = [pd.UInt8Dtype(), pd.UInt16Dtype(), pd.UInt32Dtype(), pd.UInt64Dtype()]
-        self._INT_SIGNED_NOT_NULLABLE_DTYPES = [np.int8, np.int16, np.int32, np.int64]
-        self._INT_SIGNED_NULLABLE_DTYPES = [pd.Int8Dtype(), pd.Int16Dtype(), pd.Int32Dtype(), pd.Int64Dtype()]
-        self._FLOAT_DTYPES = [np.float16, np.float32, np.float64]
-        # assign incorporated modules
+
+        # define incorporated modules - columns consisting of others will not have the dtype changed
         self._INCORPORATED_MODULES = ['builtins', 'numpy', 'pandas']
-        # assign potential boolean strings (lower case)
-        self._BOOL_STRINGS_TRUE = ['t', 'true', 'yes', 'on']
-        self._BOOL_STRINGS_FALSE = ['f', 'false', 'no', 'off']
-        self._BOOL_MAP_DICT = {val: True for val in self._BOOL_STRINGS_TRUE}.update(
-            {val: False for val in self._BOOL_STRINGS_FALSE})
-        # potential null values
+
+        # define a possible list of null values
         self._NULL_VALS = [None, np.nan, 'np.nan', 'nan', np.inf, 'np.inf', 'inf', -np.inf, '-np.inf', '', 'n/a', 'na',
                            'N/A', 'NA', 'unknown', 'unk', 'UNKNOWN', 'UNK']
+
+        # assign dtypes and limits
+        # boolean
+        BOOL_STRINGS_TRUE = ['t', 'true', 'yes', 'on']
+        BOOL_STRINGS_FALSE = ['f', 'false', 'no', 'off']
+        self._BOOL_MAP_DICT = {i: True for i in BOOL_STRINGS_TRUE}.update({i: False for i in BOOL_STRINGS_FALSE})
+        self._DTYPE_BOOL_BASE = np.bool
+        self._DTYPE_BOOL_NULLABLE = pd.BooleanDtype()
+        # unsigned integers - base and nullable
+        self._DTYPES_UINT_BASE = [np.uint8, np.uint16, np.uint32, np.uint64]
+        self._DTYPES_UINT_NULLABLE = [pd.UInt8Dtype(), pd.UInt16Dtype(), pd.UInt32Dtype(), pd.UInt64Dtype()]
+        self._LIMIT_LOW_UINT = [np.iinfo(i).min for i in self._DTYPES_UINT_BASE]
+        self._LIMIT_HIGH_UINT = [np.iinfo(i).max for i in self._DTYPES_UINT_BASE]
+        # signed integers - base and nullable
+        self._DTYPES_INT_BASE = [np.int8, np.int16, np.int32, np.int64]
+        self._DTYPES_INT_NULLABLE = [pd.Int8Dtype(), pd.Int16Dtype(), pd.Int32Dtype(), pd.Int64Dtype()]
+        self._LIMIT_LOW_INT = [np.iinfo(i).min for i in self._DTYPES_INT_BASE]
+        self._LIMIT_HIGH_INT = [np.iinfo(i).max for i in self._DTYPES_INT_BASE]
+        # floats - nullable by default
+        self._DTYPES_FLOAT = [np.float16, np.float32, np.float64]
+        # datetime - nullable by default
+        self._DTYPE_DATETIME = np.datetime64
+        # string
+        self._DTYPE_STRING = pd.StringDtype()
+        # categorical - nullable by default
+        self._DTYPE_CATEGORICAL = pd.CategoricalDtype()
 
     @staticmethod
     def _validate(obj):
@@ -83,119 +96,121 @@ class ZooKeeper:
         bool_null = np.any(pd.isna(self._obj[col]))
         # get conversion lists
         if bool_signed:
-            val_bins_lower = self._INT_SIGNED_BINS_LOWER
-            val_bins_upper = self._INT_SIGNED_BINS_UPPER
+            val_bins_lower = self._LIMIT_LOW_INT
+            val_bins_upper = self._LIMIT_HIGH_INT
             if bool_null:
-                val_dtypes = self._INT_SIGNED_NULLABLE_DTYPES
+                val_dtypes = self._DTYPES_INT_NULLABLE
             else:
-                val_dtypes = self._INT_SIGNED_NOT_NULLABLE_DTYPES
+                val_dtypes = self._DTYPES_INT_BASE
         else:
-            val_bins_lower = self._INT_UNSIGNED_BINS_LOWER
-            val_bins_upper = self._INT_UNSIGNED_BINS_UPPER
+            val_bins_lower = self._LIMIT_LOW_UINT
+            val_bins_upper = self._LIMIT_HIGH_UINT
             if bool_null:
-                val_dtypes = self._INT_UNSIGNED_NULLABLE_DTYPES
+                val_dtypes = self._DTYPES_UINT_NULLABLE
             else:
-                val_dtypes = self._INT_UNSIGNED_NOT_NULLABLE_DTYPES
+                val_dtypes = self._DTYPES_UINT_BASE
         # apply conversions
         idx = max(np.where(np.array(val_bins_lower) <= val_min)[0][0],
                   np.where(np.array(val_bins_upper) >= val_max)[0][0])
         self._obj[col] = self._obj[col].astype(val_dtypes[idx])
 
-    def _minimize_memory_col_float(self, col, tol=1E-9):
+    def _minimize_memory_col_float(self, col, tol):
         if np.sum(self._obj[col] - self._obj[col].apply(lambda x: round(x, 0))) == 0:
             # check if they are actually integers (no decimal values)
             self._minimize_memory_col_int(col)
         else:
             # find the smallest float dtype that has an error less than the tolerance
-            for i_dtype in self._FLOAT_DTYPES:
+            for i_dtype in self._DTYPES_FLOAT:
                 if np.abs(self._obj[col] - self._obj[col].astype(i_dtype)).max() <= tol:
                     self._obj[col] = self._obj[col].astype(i_dtype)
                     break
 
-    def reduce_memory_usage(self, tol_float=1E-9, drop_null_cols=True, drop_null_rows=True, print_reduction=False):
-        # get the starting memory usage
+    def reduce_memory_usage(self, tol_float=1E-6, category_fraction=0.5, drop_null_cols=True, drop_null_rows=True,
+                            reset_index=False, print_reduction=False, print_warnings=True):
+        # get the starting memory usage - optional because it can add significant overhead to run time
         if print_reduction:
             mem_start = self._obj.memory_usage(deep=True).values.sum()
-        # reset index
-        # todo make reset optional, need to adjust indexing below
-        self._obj.reset_index(drop=True, inplace=True)
-        # convert nulls
+
+        # null value handling
+        # apply conversions for null values
         self._obj.replace(self._NULL_VALS, pd.NA, inplace=True)
         # drop null columns and rows
         if drop_null_cols:
-            self._obj = self._obj.loc[:, np.array(self._obj.columns)[np.any(pd.notna(self._obj), axis=0)]]
+            self._obj.dropna(axis=1, how='all', inplace=True)
         if drop_null_rows:
-            self._obj = self._obj.iloc[np.where(np.any(pd.notna(self._obj), axis=1))[0], :]
-            # reset index
-            # todo make reset optional, need to adjust indexing below
-            self._obj.reset_index(drop=True, inplace=True)
-        # loop by column to convert dtypes
-        for col, dtype in self._obj.dtypes.to_dict().items():
-            # get non-null values
-            vals_not_null = self._obj.loc[pd.notna(self._obj[col]), col].values
-            # get the modules within the column
-            col_modules = np.unique([type(val).__module__.split('.')[0] for val in vals_not_null])
-            # apply type rules
-            if np.any([val not in self._INCORPORATED_MODULES for val in col_modules]):
-                # custom objects or objects from other libraries
-                pass
-            elif len(vals_not_null) == 0:  # all null column
-                pass
-            elif np.issubdtype(dtype, np.integer) or np.issubdtype(dtype, np.floating) or \
-                    pd.isna(pd.to_numeric(vals_not_null, errors='coerce')).sum() == 0:
-                # todo allow sum to be non-zero: optional argument for allowable cell loss?, could print out lost val
-                vals_not_null = pd.to_numeric(vals_not_null, errors='coerce')
-                self._obj[col] = pd.to_numeric(self._obj[col], errors='coerce')
+            self._obj.dropna(axis=0, how='all', inplace=True)
+
+        # replace boolean-like strings with booleans
+        self._obj.replace(self._BOOL_MAP_DICT, inplace=True)
+
+        # loop by column to predict value
+        for i_col, i_dtype in self._obj.dtypes.to_dict().items():
+            # skip if column is ful of nulls and wasn't dropped
+            if not drop_null_cols:
+                if np.all(pd.isna(self._obj[i_col])):
+                    continue
+
+            # get non-null values and the unique modules
+            vals_not_null = self._obj.loc[pd.notna(self._obj[i_col]), i_col].values
+            modules = np.unique([type(val).__module__.split('.')[0] for val in vals_not_null])
+
+            # skip if col contains non-supported modules
+            if np.any([val not in self._INCORPORATED_MODULES for val in modules]):
+                continue
+
+            # check if any null values are present
+            null_vals_present = np.any(pd.isna(self._obj[i_col]))
+
+            # check and  assign dtypes
+            # todo add option to coerce small number of values and still proceed with dtype application
+            if pd.isna(pd.to_numeric(vals_not_null, errors='coerce')).sum() == 0:
                 # numeric dtype
-                if np.all(np.logical_or(vals_not_null == 0, vals_not_null == 1)):  # boolean
-                    if len(pd.isna(self._obj[col])) > 0:
-                        # nullable boolean
-                        self._obj[col] = self._obj[col].astype(pd.BooleanDtype())
-                    else:
-                        # non-nullable boolean
-                        self._obj[col] = self._obj[col].astype(np.bool)
-                elif np.issubdtype(dtype, np.integer):  # integer
-                    self._minimize_memory_col_int(col)
-                else:  # float, will try to convert to integer as well
-                    self._minimize_memory_col_float(col, tol=tol_float)
-            elif pd.isna(pd.to_datetime(vals_not_null, errors='coerce')).sum() == 0:
-                # todo allow sum to be non-zero: optional argument for allowable cell loss?, could print out lost val
-                # datetime object
-                self._obj[col] = pd.to_datetime(self._obj[col], errors='coerce')
-                # todo downcast datetime size if possible without loss
-            else:  # non-datetime, non-numeric, builtin dtype (object, etc)
-                # todo implement other dtypes - can look to pandas_profiling dtype handling
-                # todo separate dtype checking functions (eg all bool in one spot)
-                # todo custom dtypes with pandas? e.g. shapely dtype for pandas?
-                # get types
-                ex_types = np.unique([str(val.__class__).split("'")[1] for val in vals_not_null])
-                # get values and counts
-                if 'str' in ex_types and len(ex_types) > 1:
-                    self._obj.loc[pd.notna(self._obj[col]), col] = self._obj.loc[pd.notna(self._obj[col]), col].apply(
-                        lambda x: str(x))
-                    vals_not_null = self._obj.loc[pd.notna(self._obj[col]), col].values
-                ex_vals, ex_val_counts = np.unique(vals_not_null, return_counts=True)
-                # check dtypes
-                if np.all([val in self._BOOL_STRINGS_TRUE or val in self._BOOL_STRINGS_FALSE for val in ex_vals]):
+                self._obj[i_col] = pd.to_numeric(self._obj[i_col], errors='coerce')
+                vals_not_null = self._obj.loc[pd.notna(self._obj[i_col]), i_col].values
+                # check if bool, int, or float
+                if np.all(np.logical_or(vals_not_null == 0, vals_not_null == 1)):
                     # boolean
-                    vals_col = self._obj[col].map(self._BOOL_MAP_DICT)
-                    if len(pd.isna(vals_col)) > 0:
-                        # nullable boolean
-                        self._obj[col] = vals_col.astype(pd.BooleanDtype())
+                    if null_vals_present:
+                        self._obj[i_col] = self._obj[i_col].astype(self._DTYPE_BOOL_NULLABLE)
                     else:
-                        # non-nullable boolean
-                        self._obj[col] = vals_col.astype(np.bool)
-                elif np.all([isinstance(val, str) for val in ex_vals]):  # all strings
-                    if np.any(ex_val_counts > 1):  # categorical
-                        # temporary workaround - bug with categorical support for NA - using nan instead
-                        # todo update once pandas bug is fixed
-                        self._obj.loc[pd.isna(self._obj[col]), col] = np.nan
-                        self._obj[col] = self._obj[col].astype(pd.CategoricalDtype())
-                    else:  # string
-                        self._obj[col] = self._obj[col].astype(pd.StringDtype())
+                        self._obj[i_col] = self._obj[i_col].astype(self._DTYPE_BOOL_BASE)
                 else:
-                    # unknown
-                    pass
+                    # apply float, will use int if possible
+                    self._minimize_memory_col_float(i_col, tol_float)
+            elif pd.isna(pd.to_datetime(vals_not_null, errors='coerce')).sum() == 0:
+                # datetime
+                # todo add option to split datetime into year col, month col, and day col
+                self._obj[i_col] = pd.to_datetime(self._obj[i_col], errors='coerce')
+            else:
+                # get types
+                val_types = np.unique([str(val.__class__).split("'")[1] for val in vals_not_null])
+                # check if there are any non-string iterables
+                bool_iters = np.any([False if (str(val.__class__).split("'")[1] == 'str') else
+                                     (True if hasattr(val, '__iter__') else False) for val in vals_not_null])
+                # check if any are strings
+                if 'str' in val_types and ((len(val_types) == 1) or not bool_iters):
+                    # convert to strings
+                    if len(val_types) != 1:
+                        self._obj.loc[pd.notna(self._obj[i_col]), i_col] = self._obj.loc[
+                            pd.notna(self._obj[i_col]), i_col].apply(lambda x: str(x))
+                    # check for value repetition
+                    vals_not_null = self._obj.loc[pd.notna(self._obj[i_col]), i_col].values
+                    if len(np.unique(vals_not_null)) / len(vals_not_null) <= category_fraction:
+                        # todo report pandas bug - categorical requires nan, doesn't work with pd.NA
+                        if null_vals_present:
+                            self._obj.loc[pd.isna(self._obj[i_col]), i_col] = np.nan
+                        self._obj[i_col] = self._obj[i_col].astype(self._DTYPE_CATEGORICAL)
+                    else:
+                        self._obj[i_col] = self._obj[i_col].astype(self._DTYPE_STRING)
+                else:
+                    if print_warnings:
+                        warnings.warn('Handling for columns with variable types "%s" not implemented' %
+                                      (str(val_types)), RuntimeWarning)
+
+        # reset index
+        if reset_index:
+            self._obj.reset_index(drop=True, inplace=True)
+
         # get the ending memory usage and output the reduction
         if print_reduction:
             # get end memory
